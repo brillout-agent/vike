@@ -684,9 +684,8 @@ function disableClientRouting(err: unknown, log: boolean) {
     false,
     [
       'Failed to fetch static asset.',
-      import.meta.env.PROD ? 'This usually happens when a new frontend is deployed.' : null,
+      import.meta.env.PROD ? '(Because new frontend deployment, or flaky connection.)' : null,
       'Falling back to Server Routing.',
-      '(The next page navigation will use Server Routing instead of Client Routing.)',
     ]
       .filter(Boolean)
       .join(' '),
@@ -796,14 +795,12 @@ async function loadPageConfigsLazyClientSideAndExecHook<
   } catch (err_) {
     err = err_
     hasErr = true
-    if (handleErrorFetchingStaticAssets(err, pageContext, isFirstRender)) {
-      return { skip: true }
-    } else {
-      // Syntax error in user file
-    }
   }
   if (isRenderOutdated()) return { skip: true }
-  if (hasErr) return { err }
+  if (hasErr) {
+    if (handleErrorFetchingStaticAssets(err, pageContext, isFirstRender)) return { skip: true }
+    return { err }
+  }
   objectAssign(pageContext, pageContextAddendum!)
 
   try {
@@ -822,22 +819,34 @@ function handleErrorFetchingStaticAssets(
   pageContext: { urlOriginal: string },
   isFirstRender: boolean,
 ): boolean {
-  if (!isErrorFetchingStaticAssets(err)) {
-    return false
-  }
-
+  if (import.meta.env.DEV) return false
+  if (!isErrorFetchingStaticAssets(err)) return false // Syntax error in user file
+  // Possible reasons:
+  // - Flaky connection
+  // - New frontend was deployed
+  disableClientRouting(err, false)
   if (isFirstRender) {
-    disableClientRouting(err, false)
-    // This may happen if the frontend was newly deployed during hydration.
-    // Ideally: re-try a couple of times by reloading the page (not entirely trivial to implement since `localStorage` is needed.)
-    throw err
+    // We don't reload a page that was itself loaded by a reload, in order to avoid an infinite reload loop
+    if (isPageReload()) return false
+    // We use `location.reload()` instead of redirectHard(): navigating with `location.href = url` creates a `type: 'navigate'` entry, which would lead to an infinite reload loop — see isPageReload()
+    const reload = () => window.location.reload()
+    if (navigator.onLine) reload()
+    else window.addEventListener('online', reload, { once: true })
   } else {
-    disableClientRouting(err, true)
+    redirectHard(pageContext.urlOriginal)
   }
-
-  redirectHard(pageContext.urlOriginal)
-
   return true
+}
+// Whether the current page was loaded by a page reload
+function isPageReload(): boolean {
+  // The browser records how the current document was loaded (Navigation Timing API)
+  const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+  return (
+    // Cannot be determined (e.g. older browsers)
+    !navigation ||
+    // A document loaded by `location.reload()` has `type: 'reload'`
+    navigation.type === 'reload'
+  )
 }
 
 // [HMR] If error page is shown => re-render whole page
